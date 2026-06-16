@@ -37,6 +37,14 @@ def test_scenario_d_warning_title_case_rejects():
     assert result.verdict == "REJECT"
 
 
+def test_scenario_e_warning_missing_needs_review():
+    # An empty warning extraction can't distinguish "absent" from "not
+    # captured in the photo", so it defers to a human rather than auto-reject.
+    blank_warning = _fields(warning="")
+    result = assemble_verdict("Old Tom Distillery", "45", blank_warning)
+    assert result.verdict == "NEEDS REVIEW"
+
+
 def test_scenario_f_unreadable_needs_review():
     blank = _fields(brand="", abv="", warning="")
     result = assemble_verdict("Old Tom Distillery", "45", blank)

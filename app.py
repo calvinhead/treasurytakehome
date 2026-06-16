@@ -289,7 +289,7 @@ with gr.Blocks(title="TTB Label Verifier") as demo:
                     )
                     abv_in = gr.Textbox(
                         label="Expected alcohol content (from application)",
-                        info="Percent alcohol by volume, e.g. 45. Enter the percentage, not the proof.",
+                        info="Percent alcohol by volume - e.g. 4.6 for a beer, 45 for spirits. Enter the percentage, not the proof.",
                     )
                     sample_btn = gr.Button("Load sample")
                     image_in = gr.Image(label="Label photo", type="filepath", sources=["upload"])

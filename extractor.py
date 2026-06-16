@@ -23,8 +23,11 @@ load_dotenv()  # pulls ANTHROPIC_API_KEY from .env when running locally
 # budget. Swap this string to change models; nothing else needs to change.
 MODEL = "claude-haiku-4-5-20251001"
 
-# Longest edge (px) an uploaded label is resized to before sending.
-MAX_IMAGE_EDGE = 1024
+# Longest edge (px) an uploaded label is resized to before sending. Anthropic's
+# vision models operate best around 1568px on the long edge, so we size close
+# to that: large enough to keep small print (the government warning) legible,
+# while still cutting upload/processing time versus a full-resolution photo.
+MAX_IMAGE_EDGE = 1536
 
 # Fields the model is asked to read. The first three are verified downstream;
 # the rest are displayed for the agent's reference.
@@ -42,9 +45,12 @@ _PROMPT = (
     "respond with ONLY a JSON object - no prose, no markdown fences. "
     "Use exactly these keys: " + ", ".join(FIELDS) + ". "
     "Copy text verbatim as printed and preserve capitalization exactly; this "
-    "matters for the government warning. If a field is not visible, set its "
-    "value to an empty string. For government_warning, return the full warning "
-    "text exactly as printed, or an empty string if no warning is present."
+    "matters for the government warning. The government warning is often in "
+    "small, low-contrast print near the bottom or side of the label - look "
+    "carefully and transcribe it in full if any part of it is visible. If a "
+    "field is genuinely not visible, set its value to an empty string. For "
+    "government_warning, return the full warning text exactly as printed, or "
+    "an empty string only if no warning text is present at all."
 )
 
 

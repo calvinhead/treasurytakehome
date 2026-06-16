@@ -25,20 +25,21 @@ class VerificationResult:
     message: str = ""            # plain-English summary or error note
 
 
-def _label_unreadable(fields: dict) -> bool:
-    """True if the core fields all came back empty (image couldn't be read)."""
-    core = ["brand_name", "abv", "government_warning"]
-    return all(not (fields.get(k) or "").strip() for k in core)
-
-
 def assemble_verdict(expected_brand: str, expected_abv: str, fields: dict) -> VerificationResult:
     """Pure verdict logic over already-extracted fields. No network calls.
 
-    NEEDS REVIEW is reserved for the case where the label couldn't be read
-    (scenario F): better a human looks than the tool auto-rejects a bad photo.
-    A confidently-read label either APPROVES (all checks pass) or REJECTS.
+    The key distinction: a required field that was *read but failed* is a
+    confident mismatch and drives a REJECT. A required field that came back
+    *empty* couldn't be verified - we can't tell "missing from the label" from
+    "the photo didn't capture it" - so it drives NEEDS REVIEW, deferring to a
+    human rather than auto-rejecting a possibly-compliant label.
     """
-    if _label_unreadable(fields):
+    brand_read = (fields.get("brand_name") or "").strip()
+    abv_read = (fields.get("abv") or "").strip()
+    warning_read = (fields.get("government_warning") or "").strip()
+
+    # Nothing readable at all -> the photo itself is the problem.
+    if not (brand_read or abv_read or warning_read):
         return VerificationResult(
             verdict="NEEDS REVIEW",
             checks=[],
@@ -48,25 +49,41 @@ def assemble_verdict(expected_brand: str, expected_abv: str, fields: dict) -> Ve
         )
 
     checks = [
-        check_brand(expected_brand, fields.get("brand_name", "")),
-        check_abv(expected_abv, fields.get("abv", "")),
-        check_warning(fields.get("government_warning", "")),
+        check_brand(expected_brand, brand_read),
+        check_abv(expected_abv, abv_read),
+        check_warning(warning_read),
     ]
+    was_read = {
+        "Brand name": bool(brand_read),
+        "Alcohol content": bool(abv_read),
+        "Government warning": bool(warning_read),
+    }
 
-    if all(c.passed for c in checks):
+    confident_failures = [c.field for c in checks if not c.passed and was_read[c.field]]
+    unread = [c.field for c in checks if not was_read[c.field]]
+
+    if confident_failures:
         return VerificationResult(
-            verdict="APPROVE",
+            verdict="REJECT",
             checks=checks,
             extracted=fields,
-            message="All required fields match the application.",
+            message="Does not match the application: " + ", ".join(confident_failures) + ".",
         )
 
-    failed = [c.field for c in checks if not c.passed]
+    if unread:
+        return VerificationResult(
+            verdict="NEEDS REVIEW",
+            checks=checks,
+            extracted=fields,
+            message="Couldn't clearly read: " + ", ".join(unread) +
+                    ". Please review manually or upload a clearer photo.",
+        )
+
     return VerificationResult(
-        verdict="REJECT",
+        verdict="APPROVE",
         checks=checks,
         extracted=fields,
-        message="Does not match the application: " + ", ".join(failed) + ".",
+        message="All required fields match the application.",
     )
 
 
