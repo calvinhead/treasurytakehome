@@ -48,6 +48,20 @@ _PROMPT = (
 )
 
 
+# A single client, created on first use and reused across calls. Reusing it
+# (rather than constructing a new Anthropic() per request) avoids repeated
+# setup cost and connection warmup on every verification. Lazy init keeps the
+# module importable without a key, which the unit tests rely on.
+_client = None
+
+
+def _get_client() -> Anthropic:
+    global _client
+    if _client is None:
+        _client = Anthropic()  # reads ANTHROPIC_API_KEY from the environment
+    return _client
+
+
 def _downscale_to_jpeg(image_bytes: bytes, max_edge: int = MAX_IMAGE_EDGE) -> bytes:
     """Resize so the longest edge is <= max_edge; return JPEG bytes."""
     img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -69,7 +83,7 @@ def extract_fields(image_bytes: bytes) -> dict:
     jpeg = _downscale_to_jpeg(image_bytes)
     b64 = base64.standard_b64encode(jpeg).decode("ascii")
 
-    client = Anthropic()  # reads ANTHROPIC_API_KEY from the environment
+    client = _get_client()
     message = client.messages.create(
         model=MODEL,
         max_tokens=1024,
