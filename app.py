@@ -54,6 +54,12 @@ def load_sample():
     return SAMPLE_BRAND, SAMPLE_ABV
 
 
+def clear_form():
+    """Reset the single-label tab for the next bottle: clear inputs, image,
+    and results back to the starting state."""
+    return "", "", None, INITIAL_HTML
+
+
 def _banner(verdict: str, message: str) -> str:
     color, label = VERDICT_STYLE.get(verdict, ("#57606a", verdict))
     return (
@@ -294,11 +300,13 @@ with gr.Blocks(title="TTB Label Verifier") as demo:
                     sample_btn = gr.Button("Load sample")
                     image_in = gr.Image(label="Label photo", type="filepath", sources=["upload"])
                     verify_btn = gr.Button("Verify", variant="primary", size="lg")
+                    clear_btn = gr.Button("Check another label")
                 with gr.Column(scale=1):
                     output = gr.HTML(value=INITIAL_HTML)
 
             sample_btn.click(load_sample, outputs=[brand_in, abv_in])
             verify_btn.click(on_verify, inputs=[brand_in, abv_in, image_in], outputs=[output])
+            clear_btn.click(clear_form, outputs=[brand_in, abv_in, image_in, output])
 
         with gr.Tab("Batch"):
             gr.Markdown(
