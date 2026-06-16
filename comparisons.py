@@ -28,6 +28,12 @@ CANONICAL_WARNING = (
 # different names fail.
 BRAND_MATCH_THRESHOLD = 90
 
+# The government warning body is compared with a high fuzzy threshold rather
+# than exact equality, so a minor vision/OCR slip on a real label (one
+# misread or dropped word) doesn't falsely fail a compliant warning, while
+# genuinely reworded or incomplete warnings still fall below it and fail.
+WARNING_MATCH_THRESHOLD = 90
+
 # Allowed absolute difference between expected and label ABV, in percentage
 # points. Absorbs trivial formatting noise (e.g. "45" vs "45.0").
 ABV_TOLERANCE = 0.1
@@ -156,7 +162,7 @@ def check_warning(found: str) -> FieldResult:
             "The required 'GOVERNMENT WARNING' heading was not found.",
         )
 
-    if found_norm.lower() != canonical_norm.lower():
+    if fuzz.ratio(found_norm.lower(), canonical_norm.lower()) < WARNING_MATCH_THRESHOLD:
         return FieldResult(
             "Government warning", CANONICAL_WARNING, found, False,
             "Warning wording does not match the required statement.",

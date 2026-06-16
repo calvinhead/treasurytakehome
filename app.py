@@ -88,15 +88,16 @@ def _results_html(result) -> str:
             for c in result.checks
         )
         parts.append(
-            f'<table style="font-family:{FONT};width:100%;border-collapse:collapse;'
-            'font-size:15px;">'
+            '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch;">'
+            f'<table style="font-family:{FONT};width:100%;min-width:560px;'
+            'border-collapse:collapse;font-size:15px;">'
             '<thead><tr style="background:#f3f3f3;text-align:left;">'
             '<th style="padding:8px;">Field</th>'
             '<th style="padding:8px;">Expected</th>'
             '<th style="padding:8px;">Read from label</th>'
             '<th style="padding:8px;">Result</th>'
             '<th style="padding:8px;">Why</th>'
-            f'</tr></thead><tbody>{rows}</tbody></table>'
+            f'</tr></thead><tbody>{rows}</tbody></table></div>'
         )
 
     extra = [
@@ -197,15 +198,16 @@ def _batch_html(results, summary, unmatched) -> str:
             '</tr>'
         )
     parts.append(
-        f'<table style="font-family:{FONT};width:100%;border-collapse:collapse;'
-        'font-size:15px;">'
+        '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch;">'
+        f'<table style="font-family:{FONT};width:100%;min-width:560px;'
+        'border-collapse:collapse;font-size:15px;">'
         '<thead><tr style="background:#f3f3f3;text-align:left;">'
         '<th style="padding:8px;">File</th>'
         '<th style="padding:8px;">Verdict</th>'
         '<th style="padding:8px;">Brand</th>'
         '<th style="padding:8px;">ABV</th>'
         '<th style="padding:8px;">Warning</th>'
-        f'</tr></thead><tbody>{"".join(rows)}</tbody></table>'
+        f'</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
     )
 
     if unmatched:
@@ -281,8 +283,14 @@ with gr.Blocks(title="TTB Label Verifier") as demo:
         with gr.Tab("Single label"):
             with gr.Row():
                 with gr.Column(scale=1):
-                    brand_in = gr.Textbox(label="Expected brand name (from application)")
-                    abv_in = gr.Textbox(label="Expected alcohol content (from application)")
+                    brand_in = gr.Textbox(
+                        label="Expected brand name (from application)",
+                        info="Type it as printed on the label, e.g. Old Tom Distillery.",
+                    )
+                    abv_in = gr.Textbox(
+                        label="Expected alcohol content (from application)",
+                        info="Percent alcohol by volume, e.g. 45. Enter the percentage, not the proof.",
+                    )
                     sample_btn = gr.Button("Load sample")
                     image_in = gr.Image(label="Label photo", type="filepath", sources=["upload"])
                     verify_btn = gr.Button("Verify", variant="primary", size="lg")

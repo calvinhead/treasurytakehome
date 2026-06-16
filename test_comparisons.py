@@ -66,3 +66,9 @@ def test_warning_scenario_e_missing_fails_as_not_found():
 
 def test_warning_reworded_fails():
     assert not check_warning("GOVERNMENT WARNING: Drinking is bad for you.").passed
+
+
+def test_warning_minor_ocr_slip_still_passes():
+    # A real label read with one dropped letter should not falsely fail.
+    slipped = CANONICAL_WARNING.replace("birth defects", "birth defect")
+    assert check_warning(slipped).passed
