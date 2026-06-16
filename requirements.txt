@@ -1,2 +1,5 @@
 gradio
 rapidfuzz
+anthropic
+pillow
+python-dotenv
