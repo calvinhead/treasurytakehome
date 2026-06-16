@@ -41,3 +41,21 @@ def test_scenario_f_unreadable_needs_review():
     blank = _fields(brand="", abv="", warning="")
     result = assemble_verdict("Old Tom Distillery", "45", blank)
     assert result.verdict == "NEEDS REVIEW"
+
+
+def test_verify_batch_and_summary():
+    # Inject a fake verifier so the batch loop is tested without any API call.
+    def fake_verify(brand, abv, image_bytes):
+        from orchestrator import VerificationResult
+        verdict = "APPROVE" if brand == "good" else "REJECT"
+        return VerificationResult(verdict, [], {}, "")
+
+    from orchestrator import verify_batch, summarize
+    items = [
+        {"filename": "a.png", "brand": "good", "abv": "45", "image_bytes": b""},
+        {"filename": "b.png", "brand": "bad", "abv": "45", "image_bytes": b""},
+        {"filename": "c.png", "brand": "good", "abv": "45", "image_bytes": b""},
+    ]
+    results = verify_batch(items, _verify=fake_verify)
+    summary = summarize(results)
+    assert summary == {"total": 3, "APPROVE": 2, "REJECT": 1, "NEEDS REVIEW": 0}

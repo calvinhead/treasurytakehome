@@ -6,7 +6,8 @@ so it is unit-testable without any network or model call.
 """
 
 from dataclasses import dataclass
-from typing import List
+from typing import Callable, List
+from collections import Counter
 
 from comparisons import FieldResult, check_brand, check_abv, check_warning
 from extractor import extract_fields, FIELDS
@@ -82,3 +83,29 @@ def verify_label(expected_brand: str, expected_abv: str, image_bytes: bytes) -> 
                      "clearer image."),
         )
     return assemble_verdict(expected_brand, expected_abv, fields)
+
+
+def verify_batch(items: List[dict], _verify: Callable = verify_label) -> List[dict]:
+    """Run verification over many labels at once.
+
+    Each item is a dict with keys: filename, brand, abv, image_bytes. Returns
+    one dict per item: {"filename", "result"}. This simply loops the proven
+    single-label pipeline, which is why batch adds almost no new risk. _verify
+    is injectable so the loop can be tested without any network call.
+    """
+    out = []
+    for item in items:
+        result = _verify(item["brand"], item["abv"], item["image_bytes"])
+        out.append({"filename": item["filename"], "result": result})
+    return out
+
+
+def summarize(batch_results: List[dict]) -> dict:
+    """Count verdicts across a batch. Pure function over assembled results."""
+    counts = Counter(b["result"].verdict for b in batch_results)
+    return {
+        "total": len(batch_results),
+        "APPROVE": counts.get("APPROVE", 0),
+        "REJECT": counts.get("REJECT", 0),
+        "NEEDS REVIEW": counts.get("NEEDS REVIEW", 0),
+    }
