@@ -17,8 +17,7 @@ def _fields(brand="OLD TOM DISTILLERY", abv="45% Alc./Vol.", warning=CANONICAL_W
 
 
 def test_scenario_a_all_match_approves():
-    result = assemble_verdict("Old Tom Distillery", "45", _fields())
-    assert result.verdict == "APPROVE"
+    assert assemble_verdict("Old Tom Distillery", "45", _fields()).verdict == "APPROVE"
 
 
 def test_scenario_b_fuzzy_brand_still_approves():
@@ -27,21 +26,29 @@ def test_scenario_b_fuzzy_brand_still_approves():
 
 
 def test_scenario_c_abv_mismatch_rejects():
+    # Brand and warning read correctly, so the ABV mismatch is trustworthy.
     result = assemble_verdict("Old Tom Distillery", "45", _fields(abv="40%"))
     assert result.verdict == "REJECT"
 
 
-def test_scenario_d_warning_title_case_rejects():
+def test_scenario_d_warning_titlecase_rejects():
     bad = CANONICAL_WARNING.replace("GOVERNMENT WARNING", "Government Warning")
     result = assemble_verdict("Old Tom Distillery", "45", _fields(warning=bad))
     assert result.verdict == "REJECT"
 
 
 def test_scenario_e_warning_missing_needs_review():
-    # An empty warning extraction can't distinguish "absent" from "not
-    # captured in the photo", so it defers to a human rather than auto-reject.
-    blank_warning = _fields(warning="")
-    result = assemble_verdict("Old Tom Distillery", "45", blank_warning)
+    # Brand and ABV read fine; an empty warning can't be told apart from one
+    # the photo simply didn't capture, so defer to a human.
+    result = assemble_verdict("Old Tom Distillery", "45", _fields(warning=""))
+    assert result.verdict == "NEEDS REVIEW"
+
+
+def test_garbled_photo_all_fields_wrong_needs_review():
+    # The real-world glare case: every field misread (nothing matches). With no
+    # correct read to anchor on, this is a photo problem, not a confident reject.
+    garbled = _fields(brand="Modelo", abv="5", warning="WARNING 1 GENERAL BEERS 1062")
+    result = assemble_verdict("Corona Extra", "4.6", garbled)
     assert result.verdict == "NEEDS REVIEW"
 
 
@@ -52,11 +59,9 @@ def test_scenario_f_unreadable_needs_review():
 
 
 def test_verify_batch_and_summary():
-    # Inject a fake verifier so the batch loop is tested without any API call.
     def fake_verify(brand, abv, image_bytes):
         from orchestrator import VerificationResult
-        verdict = "APPROVE" if brand == "good" else "REJECT"
-        return VerificationResult(verdict, [], {}, "")
+        return VerificationResult("APPROVE" if brand == "good" else "REJECT", [], {}, "")
 
     from orchestrator import verify_batch, summarize
     items = [
@@ -64,6 +69,5 @@ def test_verify_batch_and_summary():
         {"filename": "b.png", "brand": "bad", "abv": "45", "image_bytes": b""},
         {"filename": "c.png", "brand": "good", "abv": "45", "image_bytes": b""},
     ]
-    results = verify_batch(items, _verify=fake_verify)
-    summary = summarize(results)
+    summary = summarize(verify_batch(items, _verify=fake_verify))
     assert summary == {"total": 3, "APPROVE": 2, "REJECT": 1, "NEEDS REVIEW": 0}

@@ -28,25 +28,18 @@ class VerificationResult:
 def assemble_verdict(expected_brand: str, expected_abv: str, fields: dict) -> VerificationResult:
     """Pure verdict logic over already-extracted fields. No network calls.
 
-    The key distinction: a required field that was *read but failed* is a
-    confident mismatch and drives a REJECT. A required field that came back
-    *empty* couldn't be verified - we can't tell "missing from the label" from
-    "the photo didn't capture it" - so it drives NEEDS REVIEW, deferring to a
-    human rather than auto-rejecting a possibly-compliant label.
+    Three outcomes, chosen to avoid false rejects on poor photos:
+      - APPROVE: all three required fields read and matched.
+      - REJECT: at least one field read *correctly* (proving the photo is
+        legible) AND at least one field read but mismatched. The good read is
+        what makes the mismatch trustworthy.
+      - NEEDS REVIEW: everything else - nothing read correctly (a glare/blur
+        problem, not a label wrong on every axis), or a required field came
+        back empty. Defer to a human rather than guess.
     """
     brand_read = (fields.get("brand_name") or "").strip()
     abv_read = (fields.get("abv") or "").strip()
     warning_read = (fields.get("government_warning") or "").strip()
-
-    # Nothing readable at all -> the photo itself is the problem.
-    if not (brand_read or abv_read or warning_read):
-        return VerificationResult(
-            verdict="NEEDS REVIEW",
-            checks=[],
-            extracted=fields,
-            message=("Couldn't read the label clearly. Please upload a sharper, "
-                     "straight-on photo with no glare."),
-        )
 
     checks = [
         check_brand(expected_brand, brand_read),
@@ -59,10 +52,21 @@ def assemble_verdict(expected_brand: str, expected_abv: str, fields: dict) -> Ve
         "Government warning": bool(warning_read),
     }
 
+    passes = [c for c in checks if c.passed]
     confident_failures = [c.field for c in checks if not c.passed and was_read[c.field]]
     unread = [c.field for c in checks if not was_read[c.field]]
 
-    if confident_failures:
+    if len(passes) == len(checks):
+        return VerificationResult(
+            verdict="APPROVE",
+            checks=checks,
+            extracted=fields,
+            message="All required fields match the application.",
+        )
+
+    # A trustworthy REJECT needs at least one correct read alongside the
+    # mismatch - otherwise we can't tell a real mismatch from a garbled read.
+    if confident_failures and passes:
         return VerificationResult(
             verdict="REJECT",
             checks=checks,
@@ -70,20 +74,25 @@ def assemble_verdict(expected_brand: str, expected_abv: str, fields: dict) -> Ve
             message="Does not match the application: " + ", ".join(confident_failures) + ".",
         )
 
-    if unread:
+    # Nothing read correctly: overwhelmingly a photo-quality problem (glare,
+    # blur, angle) rather than a label wrong on every axis.
+    if not passes:
         return VerificationResult(
             verdict="NEEDS REVIEW",
             checks=checks,
             extracted=fields,
-            message="Couldn't clearly read: " + ", ".join(unread) +
-                    ". Please review manually or upload a clearer photo.",
+            message=("Couldn't read the label reliably. Please upload a sharper, "
+                     "straight-on photo with no glare."),
         )
 
+    # Some fields matched, but a required field came back empty and couldn't
+    # be verified - flag for a human rather than guess present-vs-uncaptured.
     return VerificationResult(
-        verdict="APPROVE",
+        verdict="NEEDS REVIEW",
         checks=checks,
         extracted=fields,
-        message="All required fields match the application.",
+        message="Couldn't clearly read: " + ", ".join(unread) +
+                ". Please review manually or upload a clearer photo.",
     )
 
 
