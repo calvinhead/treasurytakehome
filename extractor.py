@@ -14,7 +14,7 @@ import re
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
-from PIL import Image
+from PIL import Image, ImageOps
 
 load_dotenv()  # pulls ANTHROPIC_API_KEY from .env when running locally
 
@@ -29,8 +29,8 @@ MODEL = "claude-haiku-4-5-20251001"
 # while still cutting upload/processing time versus a full-resolution photo.
 MAX_IMAGE_EDGE = 1536
 
-# Fields the model is asked to read. The first three are verified downstream;
-# the rest are displayed for the agent's reference.
+# Fields the model is asked to read - all now verified downstream (see
+# orchestrator.assemble_verdict). sulfite_declaration is only checked for wine.
 FIELDS = [
     "brand_name",
     "class_type",
@@ -38,19 +38,43 @@ FIELDS = [
     "net_contents",
     "producer",
     "government_warning",
+    "sulfite_declaration",
+    "country_of_origin",
 ]
 
 _PROMPT = (
-    "You are reading a U.S. alcohol-beverage label. Extract these fields and "
-    "respond with ONLY a JSON object - no prose, no markdown fences. "
-    "Use exactly these keys: " + ", ".join(FIELDS) + ". "
-    "Copy text verbatim as printed and preserve capitalization exactly; this "
-    "matters for the government warning. The government warning is often in "
-    "small, low-contrast print near the bottom or side of the label - look "
-    "carefully and transcribe it in full if any part of it is visible. If a "
-    "field is genuinely not visible, set its value to an empty string. For "
-    "government_warning, return the full warning text exactly as printed, or "
-    "an empty string only if no warning text is present at all."
+    "You are reading a U.S. alcohol-beverage label. You may be given one or two "
+    "photos of the SAME product (for example its front and back); read each field "
+    "from whichever photo shows it, and if it appears on more than one, use the "
+    "clearest. Extract these fields and respond with ONLY a JSON object - no "
+    "prose, no markdown fences. Use exactly these keys: " + ", ".join(FIELDS) + ".\n"
+    "\n"
+    "Transcription rules:\n"
+    "- Transcribe every field VERBATIM from the printed text you can actually "
+    "see. Copy it exactly: preserve capitalization, punctuation, and digits. Do "
+    "NOT normalize, round, reformat, translate, or paraphrase. If the label reads "
+    '"4.6% ALC/VOL", then abv is "4.6%" - never "5%".\n'
+    "- Never infer a value from packaging appearance, logo style, color, or "
+    "bottle shape. brand_name in particular must come only from legible printed "
+    "text, never from recognizing the product.\n"
+    "- class_type: the beverage's class or type designation exactly as printed - "
+    'for example "Lager", "Imported Beer", "Kentucky Straight Bourbon Whiskey", '
+    'or "Red Wine".\n'
+    "- producer: capture the COMPLETE name-and-address statement. Include BOTH "
+    "the manufacturer/bottler line AND any separate importer line - for example "
+    '"CERVECERIA MODELO, NAVA, MEXICO" together with "IMPORTED BY CROWN IMPORTS, '
+    'CHICAGO, IL". Join multiple lines with "; ".\n'
+    "- government_warning: this required statement is often small, low-contrast "
+    "print near the bottom or side. Read it carefully and transcribe exactly what "
+    "is legibly printed; do not reconstruct it from memory.\n"
+    "- sulfite_declaration: the sulfiting-agent declaration if present (for "
+    'example "CONTAINS SULFITES"); use null if the label has no such statement.\n'
+    "- country_of_origin: the country-of-origin statement if present (for "
+    'example "Product of Mexico", "Imported from France", "Produced in Italy"); '
+    "use null if the label states no country of origin.\n"
+    "- If a field is illegible or not present on the label, set its value to "
+    "null. null is the correct, honest answer when you cannot read the text - "
+    "never guess a plausible value to fill a field."
 )
 
 
@@ -69,8 +93,24 @@ def _get_client() -> Anthropic:
 
 
 def _downscale_to_jpeg(image_bytes: bytes, max_edge: int = MAX_IMAGE_EDGE) -> bytes:
-    """Resize so the longest edge is <= max_edge; return JPEG bytes."""
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    """Apply camera orientation, then resize so the longest edge is <= max_edge;
+    return JPEG bytes.
+
+    Orientation matters before anything else: phones store a landscape sensor
+    frame plus an EXIF orientation flag, so a portrait photo whose flag we ignore
+    reaches the model rotated 90 degrees. That is what made the Corona back label
+    read as a sideways "Czechvar". exif_transpose rewrites the pixels upright and
+    drops the now-applied flag; it is idempotent and a no-op when there is no flag
+    (e.g. the synthetic fixtures, or an upload Gradio already transposed).
+
+    (Automatic deskew of residual small tilt was evaluated and deliberately left
+    out: without a robust text-line detector the projection-profile heuristic
+    locks onto glare bands and rotates straight labels crooked - the opposite of
+    helpful on the glare photos this tool targets. See the build notes.)
+    """
+    img = Image.open(io.BytesIO(image_bytes))
+    img = ImageOps.exif_transpose(img)
+    img = img.convert("RGB")
     img.thumbnail((max_edge, max_edge))  # preserves aspect ratio, only shrinks
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=85)
@@ -84,37 +124,42 @@ def _strip_to_json(text: str) -> str:
     return fence.group(1).strip() if fence else text
 
 
-def extract_fields(image_bytes: bytes) -> dict:
-    """Image bytes in -> dict of label fields. Raises on API or parse failure."""
-    jpeg = _downscale_to_jpeg(image_bytes)
-    b64 = base64.standard_b64encode(jpeg).decode("ascii")
+def extract_fields(image_bytes) -> dict:
+    """Image bytes (or a list of images, e.g. the front + back of one product)
+    in -> dict of label fields. Multiple images are sent in a SINGLE request and
+    the model reads each field from whichever image shows it. Raises on API or
+    parse failure.
+    """
+    images = image_bytes if isinstance(image_bytes, (list, tuple)) else [image_bytes]
+
+    content = []
+    for img in images:
+        jpeg = _downscale_to_jpeg(img)
+        b64 = base64.standard_b64encode(jpeg).decode("ascii")
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+        })
+    content.append({"type": "text", "text": _PROMPT})
 
     client = _get_client()
     message = client.messages.create(
         model=MODEL,
         max_tokens=1024,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/jpeg",
-                            "data": b64,
-                        },
-                    },
-                    {"type": "text", "text": _PROMPT},
-                ],
-            }
-        ],
+        messages=[{"role": "user", "content": content}],
     )
 
     raw = _strip_to_json(message.content[0].text)
     data = json.loads(raw)
-    # Guarantee every expected key exists even if the model omitted one.
-    return {field: str(data.get(field, "")) for field in FIELDS}
+    # Guarantee every expected key exists, and normalize the model's "abstain"
+    # signal - JSON null, or an omitted key - to an empty string, which the
+    # comparison layer already treats as "not read". (Without this, str(None)
+    # would leak the literal "None" into a field and be mistaken for a value.)
+    out = {}
+    for field in FIELDS:
+        value = data.get(field)
+        out[field] = "" if value is None else str(value)
+    return out
 
 
 if __name__ == "__main__":

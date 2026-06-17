@@ -13,7 +13,9 @@ import tempfile
 
 import gradio as gr
 
-from orchestrator import verify_label, verify_batch, summarize, DISPLAY_ONLY
+from orchestrator import (
+    verify_label, verify_batch, summarize, DISPLAY_ONLY, VERIFIED_FIELD_ORDER,
+)
 
 SAMPLE_BRAND = "Old Tom Distillery"
 SAMPLE_ABV = "45"
@@ -23,6 +25,20 @@ VERDICT_STYLE = {
     "APPROVE": ("#1a7f37", "APPROVE"),
     "NEEDS REVIEW": ("#9a6700", "NEEDS REVIEW"),
     "REJECT": ("#cf222e", "REJECT"),
+}
+
+# Per-field badge colors (the "Result" column), matching the verdict palette.
+STATUS_COLOR = {
+    "PASS": "#1a7f37",
+    "FAIL": "#cf222e",
+    "NEEDS REVIEW": "#9a6700",
+}
+
+# Friendly labels for the inferred beverage type (shown read-only).
+TYPE_LABEL = {
+    "beer": "Beer / malt beverage",
+    "wine": "Wine",
+    "spirits": "Distilled spirits",
 }
 
 # A consistent system font stack for injected HTML, so the verdict and tables
@@ -55,9 +71,9 @@ def load_sample():
 
 
 def clear_form():
-    """Reset the single-label tab for the next bottle: clear inputs, image,
-    and results back to the starting state."""
-    return "", "", None, INITIAL_HTML
+    """Reset the single-label tab for the next bottle: clear inputs, both
+    images, and results back to the starting state."""
+    return "", "", None, None, INITIAL_HTML
 
 
 def _banner(verdict: str, message: str) -> str:
@@ -71,15 +87,25 @@ def _banner(verdict: str, message: str) -> str:
     )
 
 
-def _check_row(field, expected, found, passed, reason) -> str:
-    color = "#1a7f37" if passed else "#cf222e"
-    badge = "PASS" if passed else "FAIL"
+def _badge_status(found, status) -> str:
+    """Display-only mapping for a field's badge. An unread/abstained field
+    (status FAIL but nothing was actually read) is shown as NEEDS REVIEW so the
+    row agrees with the banner; a genuine mismatch (something *was* read, it just
+    didn't match) stays FAIL. Purely cosmetic - the verdict logic is unchanged."""
+    if status == "FAIL" and not (found or "").strip():
+        return "NEEDS REVIEW"
+    return status
+
+
+def _check_row(field, expected, found, status, reason) -> str:
+    status = _badge_status(found, status)
+    color = STATUS_COLOR.get(status, "#57606a")
     return (
         '<tr style="border-bottom:1px solid #eee;">'
         f'<td style="padding:8px;font-weight:600;">{html.escape(field)}</td>'
         f'<td style="padding:8px;">{html.escape(expected) or "&mdash;"}</td>'
         f'<td style="padding:8px;">{html.escape(found) or "&mdash;"}</td>'
-        f'<td style="padding:8px;color:{color};font-weight:700;">{badge}</td>'
+        f'<td style="padding:8px;color:{color};font-weight:700;">{html.escape(status)}</td>'
         f'<td style="padding:8px;color:#444;">{html.escape(reason)}</td>'
         '</tr>'
     )
@@ -88,9 +114,18 @@ def _check_row(field, expected, found, passed, reason) -> str:
 def _results_html(result) -> str:
     parts = [_banner(result.verdict, result.message)]
 
+    bev = getattr(result, "beverage_type", "") or ""
+    type_label = TYPE_LABEL.get(bev, "Could not be determined")
+    parts.append(
+        f'<div style="font-family:{FONT};margin:-4px 0 14px;color:#555;'
+        'font-size:14px;">Beverage type (inferred from the class/type): '
+        f'<b>{html.escape(type_label)}</b> &mdash; determines which fields are '
+        'required.</div>'
+    )
+
     if result.checks:
         rows = "".join(
-            _check_row(c.field, c.expected, c.found, c.passed, c.reason)
+            _check_row(c.field, c.expected, c.found, c.status, c.reason)
             for c in result.checks
         )
         parts.append(
@@ -128,7 +163,7 @@ def _results_html(result) -> str:
     return "".join(parts)
 
 
-def on_verify(expected_brand, expected_abv, image_path):
+def on_verify(expected_brand, expected_abv, image_path, image_path_2=None):
     if not image_path:
         return _banner("NEEDS REVIEW", "Please upload a label image first.")
     if not (expected_brand or "").strip() or not (expected_abv or "").strip():
@@ -137,10 +172,15 @@ def on_verify(expected_brand, expected_abv, image_path):
             "Please enter the expected brand name and alcohol content first.",
         )
 
-    with open(image_path, "rb") as f:
-        image_bytes = f.read()
+    # Read the primary photo, plus the optional second (other-side) photo. Both
+    # are sent together so a field on either side can be verified.
+    images = []
+    for path in (image_path, image_path_2):
+        if path:
+            with open(path, "rb") as f:
+                images.append(f.read())
 
-    result = verify_label(expected_brand, expected_abv, image_bytes)
+    result = verify_label(expected_brand, expected_abv, images)
     return _results_html(result)
 
 
@@ -170,6 +210,25 @@ def _verdict_badge(verdict: str) -> str:
     )
 
 
+# Short column headers for the batch table, keyed by check field name.
+BATCH_HEADER = {
+    "Brand name": "Brand", "Class/type": "Class", "Alcohol content": "ABV",
+    "Net contents": "Net", "Producer": "Producer",
+    "Government warning": "Warning", "Sulfite declaration": "Sulfite",
+    "Country of origin": "Country",
+}
+
+
+def _batch_columns(results) -> list:
+    """Field columns to show: every field verified anywhere in this batch, in
+    the canonical VERIFIED_FIELD_ORDER. Any verified field not in that list is
+    still appended, so the batch view can never silently drop one."""
+    present = {c.field for item in results for c in item["result"].checks}
+    ordered = [f for f in VERIFIED_FIELD_ORDER if f in present]
+    extras = [f for f in sorted(present) if f not in set(VERIFIED_FIELD_ORDER)]
+    return ordered + extras
+
+
 def _batch_html(results, summary, unmatched) -> str:
     s = summary
     parts = [
@@ -182,27 +241,39 @@ def _batch_html(results, summary, unmatched) -> str:
         '</div>'
     ]
 
+    # Same field set single-label shows (shared VERIFIED_FIELD_ORDER), so a
+    # flagged row shows its CAUSE per field, not just the overall verdict.
+    columns = _batch_columns(results)
+
     def cell(checks, field):
         c = checks.get(field)
         if c is None:
             return '<td style="padding:8px;color:#999;">&mdash;</td>'
-        color = "#1a7f37" if c.passed else "#cf222e"
+        status = _badge_status(c.found, c.status)
+        color = STATUS_COLOR.get(status, "#57606a")
+        label = "REVIEW" if status == "NEEDS REVIEW" else status  # narrow column
         return (f'<td style="padding:8px;color:{color};font-weight:700;">'
-                f'{"PASS" if c.passed else "FAIL"}</td>')
+                f'{html.escape(label)}</td>')
 
     rows = []
     for item in results:
         r = item["result"]
         checks = {c.field: c for c in r.checks}
+        bev = (r.beverage_type or "").title() or "&mdash;"
+        field_cells = "".join(cell(checks, f) for f in columns)
         rows.append(
             '<tr style="border-bottom:1px solid #eee;">'
             f'<td style="padding:8px;">{html.escape(item["filename"])}</td>'
             f'<td style="padding:8px;">{_verdict_badge(r.verdict)}</td>'
-            f'{cell(checks, "Brand name")}'
-            f'{cell(checks, "Alcohol content")}'
-            f'{cell(checks, "Government warning")}'
+            f'<td style="padding:8px;color:#555;">{bev}</td>'
+            f'{field_cells}'
             '</tr>'
         )
+
+    headers = "".join(
+        f'<th style="padding:8px;">{html.escape(BATCH_HEADER.get(f, f))}</th>'
+        for f in columns
+    )
     parts.append(
         '<div style="overflow-x:auto;-webkit-overflow-scrolling:touch;">'
         f'<table style="font-family:{FONT};width:100%;min-width:560px;'
@@ -210,9 +281,8 @@ def _batch_html(results, summary, unmatched) -> str:
         '<thead><tr style="background:#f3f3f3;text-align:left;">'
         '<th style="padding:8px;">File</th>'
         '<th style="padding:8px;">Verdict</th>'
-        '<th style="padding:8px;">Brand</th>'
-        '<th style="padding:8px;">ABV</th>'
-        '<th style="padding:8px;">Warning</th>'
+        '<th style="padding:8px;">Type</th>'
+        f'{headers}'
         f'</tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
     )
 
@@ -240,7 +310,7 @@ def _make_template_csv() -> str:
 TEMPLATE_CSV = _make_template_csv()
 
 
-def on_batch(image_paths, csv_path):
+def on_batch(image_paths, csv_path, progress=gr.Progress()):
     if not image_paths or not csv_path:
         return _banner(
             "NEEDS REVIEW",
@@ -267,7 +337,7 @@ def on_batch(image_paths, csv_path):
             "None of the uploaded images matched a filename in the CSV.",
         )
 
-    results = verify_batch(items)
+    results = verify_batch(items, progress=progress)
     return _batch_html(results, summarize(results), unmatched)
 
 
@@ -299,14 +369,18 @@ with gr.Blocks(title="TTB Label Verifier") as demo:
                     )
                     sample_btn = gr.Button("Load sample")
                     image_in = gr.Image(label="Label photo", type="filepath", sources=["upload"])
+                    image_in_2 = gr.Image(
+                        label="Additional photo - other side (optional)",
+                        type="filepath", sources=["upload"],
+                    )
                     verify_btn = gr.Button("Verify", variant="primary", size="lg")
                     clear_btn = gr.Button("Check another label")
                 with gr.Column(scale=1):
                     output = gr.HTML(value=INITIAL_HTML)
 
             sample_btn.click(load_sample, outputs=[brand_in, abv_in])
-            verify_btn.click(on_verify, inputs=[brand_in, abv_in, image_in], outputs=[output])
-            clear_btn.click(clear_form, outputs=[brand_in, abv_in, image_in, output])
+            verify_btn.click(on_verify, inputs=[brand_in, abv_in, image_in, image_in_2], outputs=[output])
+            clear_btn.click(clear_form, outputs=[brand_in, abv_in, image_in, image_in_2, output])
 
         with gr.Tab("Batch"):
             gr.Markdown(
